@@ -1,0 +1,14 @@
+# Build output
+*.exe
+*.exe.bak
+*.pdb
+
+# Runtime data written next to the program (per machine, not source)
+sessions.json
+sessions.windows.json
+overlay.json
+hook.log
+*.tmp
+
+# Local scratch
+.claude/
