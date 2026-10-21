@@ -36,6 +36,12 @@ powershell -NoProfile -File .\build.ps1
 | `claude-session-deck.exe` | 控制台程序 | 供 Claude Code 钩子调用,以及命令行工具 |
 | `claude-session-deck-gui.exe` | 窗口程序 | 悬浮窗本体 |
 
+两个程序由同一份源码编译,功能完全一样,区别只在编译目标:控制台程序运行时带控制台窗口,能读写标准输入输出;窗口程序没有控制台窗口,不会闪黑框。
+
+- **钩子请用 `claude-session-deck.exe`**:钩子需要从标准输入读取 JSON。
+- **悬浮窗由 `claude-session-deck-gui.exe` 启动**:常驻后台,不带黑框。它无法启动时(见下方"常见问题"),会自动改用 `claude-session-deck.exe overlay`。
+- 旧版本使用 `ccs.exe` / `ccs-gui.exe` 这两个名字,现已不再生成;如果钩子里还写着旧名字,请改成上面的新名字,否则钩子运行的是不会再更新的旧程序。
+
 ### 2. 注册 Claude Code 钩子
 
 把下面的内容合并进 `~/.claude/settings.json`(路径换成你自己的):
@@ -71,6 +77,8 @@ powershell -NoProfile -File .\build.ps1
 ```
 
 之后每次在 Windows Terminal 里启动 Claude Code,悬浮窗会自动随之启动(已在运行则不会重复启动)。也可以手动运行 `claude-session-deck-gui.exe`。
+
+重新构建后无需改动钩子配置,路径不变即可;但要先退出正在运行的悬浮窗,否则 exe 被占用无法覆盖。
 
 ## 使用
 

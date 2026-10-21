@@ -32,6 +32,13 @@ namespace ClaudeSessionDeck
             File.AppendAllText(Path.Combine(Store.Root, "hook.log"), line, new UTF8Encoding(false));
         }
 
+        /// <summary>For diagnostics inside the click path: a locked log file must never make opening a session fail.</summary>
+        public static void LogQuietly(string eventName, string message)
+        {
+            try { Log(eventName, message); }
+            catch (Exception) { }
+        }
+
         private static void RunCore(string eventName)
         {
             Dictionary<string, object> payload = ReadPayload();
@@ -92,7 +99,9 @@ namespace ClaudeSessionDeck
                 {
                     previousName = existing.name;
                     name = ChooseName(sessions, existing, givenTitle);
-                    sessions[sessions.IndexOf(existing)] = new Session { name = name, dir = cwd, id = sessionId, started = true, pid = claudePid, procStart = procStart, pane = pane };
+                    // A restart outside the terminal's focus cannot tell the pane; keep what was learned before.
+                    string knownPane = pane.Length > 0 ? pane : (existing.pane ?? string.Empty);
+                    sessions[sessions.IndexOf(existing)] = new Session { name = name, dir = cwd, id = sessionId, started = true, pid = claudePid, procStart = procStart, pane = knownPane };
                 }
                 else
                 {

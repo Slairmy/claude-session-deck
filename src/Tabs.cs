@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Windows.Automation;
 
@@ -94,21 +95,6 @@ namespace ClaudeSessionDeck
             return false;
         }
 
-        public static bool Select(long handle, string sessionName)
-        {
-            AutomationElement tab = Find(handle, sessionName);
-            if (tab == null) { return false; }
-            try
-            {
-                ((SelectionItemPattern)tab.GetCurrentPattern(SelectionItemPattern.Pattern)).Select();
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-        }
-
         private static readonly Condition IsPane =
             new PropertyCondition(AutomationElement.ClassNameProperty, "TermControl");
 
@@ -136,30 +122,96 @@ namespace ClaudeSessionDeck
             return string.Empty;
         }
 
-        /// <summary>Focuses the pane with this runtime id, selecting the tab that holds it when needed.</summary>
+        /// <summary>Focuses the pane with this runtime id when its tab is already showing; never switches tabs.</summary>
+        public static bool FocusPaneInView(long handle, string paneId)
+        {
+            if (string.IsNullOrEmpty(paneId)) { return false; }
+            return FocusPaneInViewCore(handle, paneId);
+        }
+
+        /// <summary>
+        /// Focuses the pane with this runtime id, selecting the tab that holds it when it is not showing. Panes of tabs that
+        /// are not selected do not exist in the UIA tree, so the other tabs are tried one by one (each only until its panes
+        /// have rendered); the tab that was selected before is restored when the pane is nowhere.
+        /// </summary>
         public static bool FocusPane(long handle, string paneId)
         {
             if (string.IsNullOrEmpty(paneId)) { return false; }
-            if (FocusPaneInView(handle, paneId)) { return true; }
+            if (FocusPaneInViewCore(handle, paneId)) { return true; }
+            AutomationElement original = SelectedTab(handle);
+            HashSet<string> shown = PaneIds(PanesOf(handle));
             foreach (AutomationElement tab in Of(handle))
             {
-                if (SelectTab(tab) && WaitForPane(handle, paneId)) { return true; }
+                if (original != null && Automation.Compare(tab, original)) { continue; }
+                if (!SelectTab(tab)) { continue; }
+                Stopwatch switched = Stopwatch.StartNew();
+                shown = PaneIds(PanesAfterSwitch(handle, shown));
+                bool found = FocusPaneInViewCore(handle, paneId);
+                Hook.LogQuietly("open", "  walk tab '" + TitleOf(tab) + "' rendered in " + switched.ElapsedMilliseconds + "ms, pane found=" + found);
+                if (found) { return true; }
             }
+            Hook.LogQuietly("open", "  pane " + paneId + " is in no tab; restoring the original tab");
+            Reselect(original);
             return false;
         }
 
-        private static bool WaitForPane(long handle, string paneId)
+        private static List<AutomationElement> PanesOf(long handle)
+        {
+            List<AutomationElement> result = new List<AutomationElement>();
+            try
+            {
+                AutomationElement window = AutomationElement.FromHandle(new IntPtr(handle));
+                foreach (AutomationElement pane in window.FindAll(TreeScope.Descendants, IsPane)) { result.Add(pane); }
+            }
+            catch (Exception)
+            {
+                // Window closed or UIA unavailable: no panes.
+            }
+            return result;
+        }
+
+        private static HashSet<string> PaneIds(List<AutomationElement> panes)
+        {
+            return new HashSet<string>(panes.Select(PaneId));
+        }
+
+        /// <summary>Waits until the panes on screen are not just <paramref name="before"/>, i.e. the tab switch has rendered.</summary>
+        private static List<AutomationElement> PanesAfterSwitch(long handle, HashSet<string> before)
         {
             Stopwatch clock = Stopwatch.StartNew();
+            List<AutomationElement> panes;
             do
             {
-                if (FocusPaneInView(handle, paneId)) { return true; }
-                Thread.Sleep(50);
-            } while (clock.ElapsedMilliseconds < TitleWaitMs);
-            return false;
+                panes = PanesOf(handle);
+                if (panes.Any(p => !before.Contains(PaneId(p)))) { return panes; }
+                Thread.Sleep(30);
+            } while (clock.ElapsedMilliseconds < SwitchWaitMs);
+            Hook.LogQuietly("open", "  TIMEOUT: the tab switch did not render new panes within " + SwitchWaitMs + "ms (machine slow?)");
+            return panes;
         }
 
-        private static bool FocusPaneInView(long handle, string paneId)
+        private static AutomationElement SelectedTab(long handle)
+        {
+            foreach (AutomationElement tab in Of(handle))
+            {
+                try
+                {
+                    if (((SelectionItemPattern)tab.GetCurrentPattern(SelectionItemPattern.Pattern)).Current.IsSelected) { return tab; }
+                }
+                catch (Exception)
+                {
+                    // Not a selectable item; keep looking.
+                }
+            }
+            return null;
+        }
+
+        private static void Reselect(AutomationElement tab)
+        {
+            if (tab != null) { SelectTab(tab); }
+        }
+
+        private static bool FocusPaneInViewCore(long handle, string paneId)
         {
             try
             {
@@ -178,28 +230,79 @@ namespace ClaudeSessionDeck
             return false;
         }
 
-        private const int MaxPanesPerTab = 8;
+        private const int SwitchWaitMs = 300;
         private const int TitleWaitMs = 500;
+        private const int ScanTitleWaitMs = 250;
 
         /// <summary>
-        /// Brings a session that sits in a split pane to the front. A tab only shows the focused pane's title, so the
-        /// pane is found by stepping focus through every pane of every tab until the tab title becomes the session name.
-        /// The window must already be the foreground one: "wt -w 0" addresses the most recently used window.
+        /// Last resort for a session whose pane is unknown and whose name is no tab's title (it sits in a split pane, and a
+        /// tab only shows the focused pane's title). Focuses each pane of each tab through UIA until the tab title becomes the
+        /// session name: the tab already showing is searched first, single-pane tabs are skipped, and the tab selected
+        /// before is restored when nothing is found. Returns the pane's runtime id, or null.
         /// </summary>
-        public static bool SelectPane(long handle, string sessionName)
+        public static string ScanForSession(long handle, string sessionName)
         {
-            List<AutomationElement> tabs = Of(handle);
+            AutomationElement original = SelectedTab(handle);
+            List<AutomationElement> tabs = Of(handle).OrderBy(t => IsSame(t, original) ? 0 : 1).ToList();
+            HashSet<string> shown = new HashSet<string>();
             foreach (AutomationElement tab in tabs)
             {
-                if (tabs.Count > 1 && !SelectTab(tab)) { continue; }
-                if (TitleIs(handle, sessionName)) { return true; }
-                for (int step = 0; step < MaxPanesPerTab; step++)
+                bool showing = IsSame(tab, original);
+                if (!showing && !SelectTab(tab)) { continue; }
+                List<AutomationElement> panes = showing ? PanesOf(handle) : PanesAfterSwitch(handle, shown);
+                shown = PaneIds(panes);
+                if (panes.Count < 2)
                 {
-                    MoveFocusToNextPane();
-                    if (WaitForTitle(handle, sessionName)) { return true; }
+                    Hook.LogQuietly("open", "  scan tab '" + TitleOf(tab) + "': " + panes.Count + " pane(s), skipped");
+                    continue;
+                }
+                foreach (AutomationElement pane in panes)
+                {
+                    if (!Focus(pane)) { continue; }
+                    Stopwatch waited = Stopwatch.StartNew();
+                    bool hit = WaitForTitle(handle, sessionName, ScanTitleWaitMs);
+                    Hook.LogQuietly("open", "  scan tab '" + TitleOf(tab) + "' pane " + PaneId(pane) + " title now '" + SelectedTitle(handle)
+                        + "' hit=" + hit + " after " + waited.ElapsedMilliseconds + "ms" + (hit ? string.Empty : " (timed out)"));
+                    if (hit) { return PaneId(pane); }
                 }
             }
+            Hook.LogQuietly("open", "  scan found nothing; restoring the original tab");
+            Reselect(original);
+            return null;
+        }
+
+        private static bool IsSame(AutomationElement tab, AutomationElement other)
+        {
+            return other != null && Automation.Compare(tab, other);
+        }
+
+        private static bool Focus(AutomationElement pane)
+        {
+            try { pane.SetFocus(); return true; }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>Selects the tab whose title, minus the status glyph, is exactly the session name.</summary>
+        public static bool SelectExact(long handle, string sessionName)
+        {
+            foreach (AutomationElement tab in Of(handle))
+            {
+                if (string.Equals(StripDecoration(TitleOf(tab)), sessionName, StringComparison.OrdinalIgnoreCase)) { return SelectTab(tab); }
+            }
             return false;
+        }
+
+        /// <summary>
+        /// True only when the selected tab's title plainly names a different session, i.e. the pane that was focused is the wrong
+        /// one. An unfamiliar title proves nothing (titles get renamed and redrawn), so it counts as fine.
+        /// </summary>
+        public static bool ShowsOtherSession(long handle, string sessionName, ICollection<string> otherNames)
+        {
+            if (WaitForTitle(handle, sessionName, TitleWaitMs)) { return false; }
+            string title = StripDecoration(SelectedTitle(handle));
+            bool other = otherNames.Any(n => string.Equals(n, title, StringComparison.OrdinalIgnoreCase));
+            Hook.LogQuietly("open", "  title never became '" + sessionName + "' within " + TitleWaitMs + "ms; it is '" + title + "' (names another session=" + other + ")");
+            return other;
         }
 
         private static bool SelectTab(AutomationElement tab)
@@ -217,23 +320,15 @@ namespace ClaudeSessionDeck
             return string.Equals(StripDecoration(SelectedTitle(handle)), sessionName, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool WaitForTitle(long handle, string sessionName)
+        private static bool WaitForTitle(long handle, string sessionName, int timeoutMs)
         {
             Stopwatch clock = Stopwatch.StartNew();
-            while (clock.ElapsedMilliseconds < TitleWaitMs)
+            do
             {
                 if (TitleIs(handle, sessionName)) { return true; }
                 Thread.Sleep(50);
-            }
+            } while (clock.ElapsedMilliseconds < timeoutMs);
             return false;
-        }
-
-        private static void MoveFocusToNextPane()
-        {
-            ProcessStartInfo start = new ProcessStartInfo("wt.exe", "-w 0 move-focus nextInOrder");
-            start.UseShellExecute = false;
-            start.CreateNoWindow = true;
-            using (Process wt = Process.Start(start)) { wt.WaitForExit(3000); }
         }
 
         public static string SelectedTitle(long handle)

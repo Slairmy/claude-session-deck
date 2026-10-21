@@ -447,6 +447,7 @@ namespace ClaudeSessionDeck
             // Sessions whose hook never registered them are picked up here, but only when they really run in a Windows Terminal window.
             Reconciler.Run(live, entry => ConsoleWindows.Of(entry.Pid) != 0);
             Reconciler.SyncWindows(live);
+            PaneLearner.Learn(Store.Load());
             foreach (Session session in Store.Load())
             {
                 long window = Store.WindowOf(session.name);

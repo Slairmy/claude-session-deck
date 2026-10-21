@@ -196,6 +196,42 @@ namespace ClaudeSessionDeck
             });
         }
 
+        /// <summary>
+        /// Remembers the pane a session runs in, so opening it later does not have to search every pane. A pane belongs to
+        /// one session: any other session recorded with the same pane loses it (that record was stale or wrong).
+        /// </summary>
+        public static void SetPane(string name, string pane)
+        {
+            if (string.IsNullOrEmpty(pane)) { return; }
+            WithLock(delegate
+            {
+                List<Session> sessions = Load();
+                Session target = sessions.FirstOrDefault(s => s.name == name);
+                if (target == null) { return; }
+                List<Session> rivals = sessions.Where(s => s != target && s.pane == pane).ToList();
+                if (target.pane == pane && rivals.Count == 0) { return; }
+                Hook.LogQuietly("pane", "'" + name + "': " + target.pane + " -> " + pane
+                    + (rivals.Count > 0 ? " (taken from " + string.Join(", ", rivals.Select(r => r.name)) + ")" : string.Empty));
+                foreach (Session rival in rivals) { rival.pane = string.Empty; }
+                target.pane = pane;
+                Save(sessions);
+            });
+        }
+
+        /// <summary>Drops a recorded pane that turned out to show another session.</summary>
+        public static void ForgetPane(string name)
+        {
+            WithLock(delegate
+            {
+                List<Session> sessions = Load();
+                Session target = sessions.FirstOrDefault(s => s.name == name);
+                if (target == null || string.IsNullOrEmpty(target.pane)) { return; }
+                Hook.LogQuietly("pane", "'" + name + "': forgot " + target.pane);
+                target.pane = string.Empty;
+                Save(sessions);
+            });
+        }
+
         public static void MarkStarted(string name)
         {
             WithLock(delegate
